@@ -1,0 +1,33 @@
+# --- Secrets ---
+.env
+*.env
+!.env.example
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+env/
+ENV/
+
+# --- Streamlit ---
+.streamlit/secrets.toml
+
+# --- Generated app data (personal / not meant for version control) ---
+applications_tracker.csv
+*.pdf
+*.docx
+!sample_resume.docx
+
+# --- OS / editor cruft ---
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp

@@ -21,9 +21,19 @@ ENV/
 
 # --- Generated app data (personal / not meant for version control) ---
 applications_tracker.csv
+job_applications.db
+job_applications.db-shm
+job_applications.db-wal
+*.db-shm
+*.db-wal
+tests/.test-*.db
+tests/.test-*.csv
 *.pdf
 *.docx
 !sample_resume.docx
+
+# --- Project documents and generated academic material ---
+Documents/
 
 # --- OS / editor cruft ---
 .DS_Store

@@ -1,110 +1,146 @@
-# Job Application Assistant
+# Job Application Workspace
 
-An AI agent that compares your resume against a job posting, scores the
-match, drafts a tailored cover letter, suggests resume bullet rewrites,
-and logs every application to a tracker — with a web UI or CLI.
+A personal, local-first workspace for comparing a resume with a job posting,
+creating truthful application drafts, preparing for interviews, and tracking
+the application over time.
+
+The AI output is decision support, not an objective ATS result. Every generated
+claim should be reviewed before it is used.
 
 ## Features
 
-- **Match scoring** — 0–100 score with matched/missing skills and seniority fit
-- **Cover letter drafting** — grounded only in what's actually in your resume (no invented experience)
-- **Resume bullet suggestions** — rephrased to mirror the job posting's language for ATS matching
-- **Application tracker** — every run logs to a CSV you can review or export
+- Evidence-led fit estimate with matched skills, gaps, seniority fit, and a
+  requirement-by-requirement explanation
+- Cover letter grounded only in resume content
+- Resume bullet rewrites linked to their original resume evidence
+- Interview questions with role-specific preparation guidance
+- Editable artifacts that are saved to a local SQLite database
+- Cover letter downloads as TXT or formatted DOCX
+- Searchable application library, status history, filters, and CSV export
+- Automatic one-time migration from the legacy `applications_tracker.csv`
+- Streamlit web interface and command-line interface
 
-## Project structure
+## Architecture
 
-```
+```text
 .
-├── app.py                        # Streamlit web UI
-├── job_application_assistant.py  # CLI version (edit the paths at the bottom to run)
+├── core.py                       # Parsing, OpenAI call, SQLite, exports
+├── app.py                        # Streamlit workspace
+├── job_application_assistant.py  # CLI
+├── tests/                        # Unit and integration-style tests
+├── pyproject.toml                # pytest and Ruff configuration
 ├── requirements.txt
-├── .env.example                  # copy to .env and add your key
-└── .gitignore
+├── requirements-dev.txt
+└── .env.example
 ```
+
+The resume is processed in memory and is not written to the database. The
+database stores job metadata, generated materials, the selected model, token
+usage, and status history.
 
 ## Setup
 
-**1. Clone and enter the repo**
+Requires Python 3.10 or newer.
+
 ```bash
-git clone https://github.com/akashkuushwahaa/job-application-assistant.git
-cd job-application-assistant
+python -m venv .venv
 ```
 
-**2. Create a virtual environment (recommended)**
+Activate it:
+
 ```bash
-python -m venv venv
+# Windows PowerShell
+.venv\Scripts\Activate.ps1
 
 # macOS / Linux
-source venv/bin/activate
-
-# Windows (PowerShell)
-venv\Scripts\Activate.ps1
+source .venv/bin/activate
 ```
 
-**3. Install dependencies**
+Install dependencies:
+
 ```bash
 python -m pip install -r requirements.txt
 ```
 
-**4. Set your OpenAI API key**
+Copy `.env.example` to `.env`, then set your OpenAI API key:
 
-Add your real key. Alternatively, set it directly:
-```bash
-# macOS / Linux
-export OPENAI_API_KEY="sk-..."
-
-# Windows (PowerShell)
-$env:OPENAI_API_KEY="sk-..."
+```dotenv
+OPENAI_API_KEY=sk-your-key-here
+OPENAI_MODEL=gpt-4o-mini
+DATABASE_FILE=job_applications.db
 ```
-You can also just paste the key into the sidebar when the web app is running — it doesn't have to come from an environment variable.
 
-## Running the web app
+The Streamlit app never copies a server-configured key into the browser. When
+no environment key exists, a key can be entered for the current local browser
+session.
+
+## Run the web app
 
 ```bash
 python -m streamlit run app.py
 ```
-(Use `python -m streamlit` rather than a bare `streamlit` command if your system can't find the `streamlit` executable on PATH — this routes through the same Python environment you installed it in.)
 
-This opens a browser tab where you can:
-1. Upload your resume (PDF, DOCX, or TXT)
-2. Paste a job posting
-3. Click **Generate application materials**
-4. Review the match score, cover letter, and bullet suggestions
-5. See every past application in the sidebar tracker, exportable as CSV
+Use **New analysis** to prepare an application. Use **Applications** to search,
+change statuses, reopen saved materials, inspect status history, and export CSV.
 
-## Running the CLI version
+## Run the CLI
 
-Edit the bottom of `job_application_assistant.py`:
-```python
-result = run(
-    resume_path="resume.pdf",
-    job_text_or_path="job_posting.txt",
-    company="Acme Corp",
-    role="Backend Engineer",
-)
-```
-Then run:
+Analyze and save an application:
+
 ```bash
-python job_application_assistant.py
+python job_application_assistant.py \
+  --resume resume.pdf \
+  --job job-posting.txt \
+  --company "Acme Corp" \
+  --role "Backend Engineer" \
+  --job-url "https://example.com/jobs/123" \
+  --source "Referral" \
+  --location "Remote"
 ```
 
-## How it works
+Manage saved applications:
 
-1. **Parsing** — extracts plain text from your resume (PDF/DOCX/TXT) and the job posting
-2. **Match analysis** — an LLM call compares both and returns a structured JSON score, matched/missing skills, and seniority fit
-3. **Cover letter generation** — a second call drafts a letter, explicitly instructed to use only real experience from your resume — no fabricated metrics or job titles
-4. **Bullet suggestions** — rephrases your existing achievements to mirror the job posting's terminology
-5. **Tracker logging** — appends the result to `applications_tracker.csv`
+```bash
+python job_application_assistant.py --show-tracker
+python job_application_assistant.py --show APPLICATION_ID
+python job_application_assistant.py --set-status APPLICATION_ID applied
+python job_application_assistant.py --set-status APPLICATION_ID interviewing \
+  --status-note "Technical interview scheduled"
+```
 
-## Guardrails built in
+## Privacy and safety
 
-- The model is instructed not to invent achievements, metrics, or experience — everything in the cover letter must trace back to your actual resume
-- This tool only **drafts** — it never auto-submits applications. You always review and send manually
-- Low match scores (<40) trigger a warning so you can decide whether a role is worth pursuing before spending time on it
+- Resume and job text are sent to OpenAI only after explicit confirmation in
+  the web app.
+- Responses API storage is disabled for generation requests. Provider-level
+  retention policies may still apply to API traffic.
+- Resume text is not persisted locally; a filename and content hash are stored
+  to identify which version was used.
+- `.env`, SQLite files, CSV data, resumes, and generated document files are
+  excluded from Git.
+- CSV export protects spreadsheet users from formula-injection prefixes.
+- Uploaded file size, PDF page count, extracted text, URLs, model names, and
+  structured model output are validated.
 
-## Notes
+This remains a personal-use application. Do not deploy it as a public,
+multi-user service without authentication, per-user database isolation,
+encrypted file storage, quotas, and a deployment-specific privacy policy.
 
-- `applications_tracker.csv` and any resumes/job postings you upload are excluded from version control via `.gitignore` — they're personal data, not code
-- The Streamlit sidebar API key field is masked but visible within your own browser session; fine for local use, but don't deploy this publicly without adding proper authentication
-- Model defaults to `gpt-4o` in both scripts — swap to `gpt-4o-mini` for cheaper/faster iteration while testing
+## Data migration
 
+On the first database operation, rows from `applications_tracker.csv` are
+imported into SQLite and marked as migrated. The original CSV is left untouched.
+
+## Development
+
+Install development tools and run checks:
+
+```bash
+python -m pip install -r requirements-dev.txt
+python -m unittest discover -s tests -v
+# or: python -m pytest
+python -m ruff check .
+```
+
+Tests use temporary databases and mocked AI responses; they do not call the
+live OpenAI API.

@@ -1,196 +1,147 @@
-"""
-Job Application Assistant
---------------------------
-Parses a resume + job posting, scores the match, drafts a tailored
-cover letter, suggests resume bullet rewrites, and logs the result
-to a CSV tracker.
+"""Command-line interface for the Job Application Assistant."""
 
-Requires:
-    pip install openai pdfplumber python-docx
+from __future__ import annotations
 
-Set your key first:
-    export OPENAI_API_KEY="sk-..."
-"""
-
-import os
+import argparse
 import json
-import csv
-from datetime import date
+import sys
 
-import pdfplumber
-from openai import OpenAI
-
-client = OpenAI()  # reads OPENAI_API_KEY from environment
-MODEL = "gpt-4o"   # swap for a cheaper model (e.g. gpt-4o-mini) if you want faster/cheaper runs
-
-TRACKER_FILE = "applications_tracker.csv"
+import core
 
 
-# ---------- Step 1: Parsing ----------
-
-def extract_resume_text(path: str) -> str:
-    """Extract plain text from a PDF resume."""
-    if path.lower().endswith(".pdf"):
-        with pdfplumber.open(path) as pdf:
-            return "\n".join(page.extract_text() or "" for page in pdf.pages)
-    elif path.lower().endswith(".docx"):
-        from docx import Document
-        doc = Document(path)
-        return "\n".join(p.text for p in doc.paragraphs)
-    else:
-        # assume plain text file
-        with open(path, "r", encoding="utf-8") as f:
-            return f.read()
+def _configure_console() -> None:
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure:
+            reconfigure(encoding="utf-8", errors="replace")
 
 
-def load_job_posting(text_or_path: str) -> str:
-    """Accepts either raw pasted text or a path to a text file."""
-    if os.path.isfile(text_or_path):
-        with open(text_or_path, "r", encoding="utf-8") as f:
-            return f.read()
-    return text_or_path
+def cmd_run(args: argparse.Namespace) -> int:
+    try:
+        resume_text = core.extract_resume_text_from_path(args.resume)
+        job_text = core.load_job_posting(args.job)
+        client = core.get_client()
+        print("Analyzing fit and preparing application materials…")
+        result = core.run_pipeline(
+            client,
+            resume_text,
+            job_text,
+            args.company,
+            args.role,
+            model=args.model,
+            resume_name=args.resume,
+            job_url=args.job_url,
+            source=args.source,
+            location=args.location,
+        )
+    except core.AssistantError as exc:
+        print(f"\nError: {exc}", file=sys.stderr)
+        return 1
 
-
-# ---------- Step 2: Match analysis ----------
-
-def analyze_match(resume_text: str, job_text: str) -> dict:
-    prompt = f"""You are an expert technical recruiter. Compare the resume against the job posting.
-
-RESUME:
-{resume_text}
-
-JOB POSTING:
-{job_text}
-
-Return ONLY valid JSON (no markdown, no commentary) with this exact shape:
-{{
-  "match_score": <integer 0-100>,
-  "matched_skills": [<strings>],
-  "missing_skills": [<strings>],
-  "seniority_fit": "<under | matched | over>",
-  "notes": "<1-2 sentence summary of overall fit>"
-}}"""
-
-    response = client.chat.completions.create(
-        model=MODEL,
-        messages=[{"role": "user", "content": prompt}],
-        temperature=0.2,
-        response_format={"type": "json_object"},
-    )
-    return json.loads(response.choices[0].message.content)
-
-
-# ---------- Step 3: Cover letter generation ----------
-
-def generate_cover_letter(resume_text: str, job_text: str, analysis: dict) -> str:
-    prompt = f"""Write a tailored, professional cover letter for this job application.
-
-STRICT RULES:
-- Only reference experience, skills, and achievements that actually appear in the resume below.
-- Do NOT invent metrics, job titles, companies, or accomplishments.
-- If a required skill from the job posting is missing from the resume, do not claim it — omit it or address transferable experience instead.
-- Keep it to 3-4 short paragraphs, no generic filler ("I am writing to express my interest...").
-- Mirror some of the job posting's own terminology where it genuinely matches the resume.
-
-RESUME:
-{resume_text}
-
-JOB POSTING:
-{job_text}
-
-MATCH ANALYSIS (for your reference, do not repeat verbatim):
-{json.dumps(analysis)}
-
-Write only the cover letter body text."""
-
-    response = client.chat.completions.create(
-        model=MODEL,
-        messages=[{"role": "user", "content": prompt}],
-        temperature=0.5,
-    )
-    return response.choices[0].message.content.strip()
-
-
-# ---------- Step 4: Resume bullet suggestions ----------
-
-def suggest_bullets(resume_text: str, job_text: str, analysis: dict) -> list:
-    prompt = f"""Suggest 2-3 rewritten resume bullet points that better mirror this job posting's
-language, using ONLY achievements already present in the resume (rephrase, don't invent).
-
-RESUME:
-{resume_text}
-
-JOB POSTING:
-{job_text}
-
-Return ONLY valid JSON: {{"suggested_bullets": [<strings>]}}"""
-
-    response = client.chat.completions.create(
-        model=MODEL,
-        messages=[{"role": "user", "content": prompt}],
-        temperature=0.3,
-        response_format={"type": "json_object"},
-    )
-    return json.loads(response.choices[0].message.content)["suggested_bullets"]
-
-
-# ---------- Step 5: Tracker logging ----------
-
-def log_application(company: str, role: str, analysis: dict):
-    file_exists = os.path.isfile(TRACKER_FILE)
-    with open(TRACKER_FILE, "a", newline="", encoding="utf-8") as f:
-        writer = csv.writer(f)
-        if not file_exists:
-            writer.writerow(["date", "company", "role", "match_score", "status", "notes"])
-        writer.writerow([
-            date.today().isoformat(),
-            company,
-            role,
-            analysis["match_score"],
-            "drafted",
-            analysis.get("notes", ""),
-        ])
-
-
-# ---------- Orchestration ----------
-
-def run(resume_path: str, job_text_or_path: str, company: str, role: str):
-    resume_text = extract_resume_text(resume_path)
-    job_text = load_job_posting(job_text_or_path)
-
-    print("Analyzing match...")
-    analysis = analyze_match(resume_text, job_text)
-    print(json.dumps(analysis, indent=2))
-
+    analysis = result["analysis"]
+    print("\n--- FIT ANALYSIS ---")
+    print(json.dumps(analysis, indent=2, ensure_ascii=False))
     if analysis["match_score"] < 40:
-        print("\n⚠️  Match score is low — consider whether this role is worth pursuing before drafting.")
+        print("\nWarning: review the missing must-haves before applying.")
 
-    print("\nGenerating cover letter...")
-    cover_letter = generate_cover_letter(resume_text, job_text, analysis)
     print("\n--- COVER LETTER ---\n")
-    print(cover_letter)
+    print(result["cover_letter"])
 
-    print("\nSuggesting resume bullet rewrites...")
-    bullets = suggest_bullets(resume_text, job_text, analysis)
-    print("\n--- SUGGESTED BULLETS ---")
-    for b in bullets:
-        print(f"- {b}")
+    print("\n--- SUGGESTED RESUME BULLETS ---")
+    for item in result["suggested_bullets"]:
+        print(f"- {item['suggested_bullet']}")
+        print(f"  Evidence: {item['original_evidence']}")
 
-    log_application(company, role, analysis)
-    print(f"\nLogged to {TRACKER_FILE}")
+    print("\n--- LIKELY INTERVIEW QUESTIONS ---")
+    for question in result["interview_questions"]:
+        print(f"[{question['category']}] {question['question']}")
+        print(f"  Tip: {question['tip']}")
 
-    return {
-        "analysis": analysis,
-        "cover_letter": cover_letter,
-        "suggested_bullets": bullets,
-    }
+    usage = result.get("usage", {})
+    print(f"\nSaved as application {result['application_id']} in {core.DATABASE_FILE}")
+    print(f"Token usage: {usage.get('total_tokens', 0)} total")
+    return 0
+
+
+def cmd_show_tracker(args: argparse.Namespace) -> int:
+    try:
+        rows = core.list_applications(search=args.search, status=args.filter_status)
+    except core.AssistantError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+    if not rows:
+        print("No applications found.")
+        return 0
+    for row in rows:
+        print(
+            f"{row['id']}  {row['created_at'][:10]}  {row['company']} — {row['role']}  "
+            f"[{row['status']}]  score={row.get('match_score', '—')}"
+        )
+    return 0
+
+
+def cmd_show_application(application_id: str) -> int:
+    try:
+        item = core.get_application(application_id)
+    except core.AssistantError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+    if not item:
+        print("Application not found.", file=sys.stderr)
+        return 1
+    item.pop("job_text", None)
+    print(json.dumps(item, indent=2, ensure_ascii=False))
+    return 0
+
+
+def cmd_set_status(application_id: str, status: str, note: str) -> int:
+    try:
+        core.update_status(application_id, status, note)
+    except core.AssistantError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+    print(f"Application status updated to {status}.")
+    return 0
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="Prepare truthful job-application materials and track applications.",
+    )
+    parser.add_argument("-r", "--resume", help="Path to a PDF, DOCX, or UTF-8 TXT resume")
+    parser.add_argument("-j", "--job", help="Job text or a path to a TXT/Markdown file")
+    parser.add_argument("-c", "--company", help="Company name")
+    parser.add_argument("-R", "--role", help="Role title")
+    parser.add_argument("--job-url", default="", help="Original job posting URL")
+    parser.add_argument("--source", default="", help="Where the opportunity was found")
+    parser.add_argument("--location", default="", help="Role location or work arrangement")
+    parser.add_argument("-m", "--model", default=None, help=f"OpenAI model (default: {core.DEFAULT_MODEL})")
+    parser.add_argument("--show-tracker", action="store_true", help="List saved applications")
+    parser.add_argument("--search", default="", help="Search company, role, or notes")
+    parser.add_argument("--filter-status", choices=core.STATUSES, default="", help="Filter the tracker")
+    parser.add_argument("--show", metavar="APPLICATION_ID", help="Show one saved application")
+    parser.add_argument("--set-status", nargs=2, metavar=("APPLICATION_ID", "STATUS"), help="Update an application status")
+    parser.add_argument("--status-note", default="", help="Optional note for --set-status")
+    return parser
+
+
+def main() -> int:
+    _configure_console()
+    parser = build_parser()
+    args = parser.parse_args()
+    if args.show_tracker:
+        return cmd_show_tracker(args)
+    if args.show:
+        return cmd_show_application(args.show)
+    if args.set_status:
+        application_id, status = args.set_status
+        if status not in core.STATUSES:
+            parser.error(f"status must be one of: {', '.join(core.STATUSES)}")
+        return cmd_set_status(application_id, status, args.status_note)
+    if not all([args.resume, args.job, args.company, args.role]):
+        parser.error("--resume, --job, --company, and --role are required for analysis")
+    return cmd_run(args)
 
 
 if __name__ == "__main__":
-    # Example usage — replace with real paths/values, or wire this up to argparse/CLI input
-    result = run(
-        resume_path="resume.pdf",
-        job_text_or_path="job_posting.txt",  # or paste the job text directly as a string
-        company="Acme Corp",
-        role="Backend Engineer",
-    )
+    raise SystemExit(main())

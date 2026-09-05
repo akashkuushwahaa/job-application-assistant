@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import csv
+import sqlite3
 import unittest
-from io import BytesIO
+from io import BytesIO, StringIO
 from pathlib import Path
+from unittest.mock import Mock, patch
 from uuid import uuid4
 
 from docx import Document
@@ -236,6 +238,97 @@ class CoreTestCase(unittest.TestCase):
             with self.subTest(url=url), self.assertRaisesRegex(core.AssistantError, "http"):
                 core.validate_job_url(url)
 
+    def test_malformed_http_urls_raise_friendly_errors(self) -> None:
+        for url in ("https://[broken", "https://example.com:bad/job", "https:// /job"):
+            with self.subTest(url=url), self.assertRaises(core.AssistantError):
+                core.validate_job_url(url)
+
+    def test_cover_letter_save_and_export_preserve_paragraphs(self) -> None:
+        application_id = self.save_sample()
+        text = "Dear team,\r\n\r\nI build Python services.\r\n\r\nRegards,\r\nCandidate"
+        core.update_artifacts(application_id, cover_letter=text)
+        saved = core.get_application(application_id)["cover_letter"]
+        self.assertEqual(saved, text.replace("\r\n", "\n"))
+        document = Document(BytesIO(core.build_cover_letter_docx(saved, "Acme", "Engineer")))
+        self.assertEqual(
+            [paragraph.text for paragraph in document.paragraphs][1:],
+            ["Dear team,", "I build Python services.", "Regards,\nCandidate"],
+        )
+
+    def test_non_utf8_job_file_raises_friendly_error(self) -> None:
+        path = Path(core.TRACKER_FILE).with_suffix(".txt")
+        try:
+            path.write_bytes(b"Developer \xff")
+            with self.assertRaisesRegex(core.AssistantError, "UTF-8"):
+                core.load_job_posting(str(path))
+        finally:
+            path.unlink(missing_ok=True)
+
+    def test_database_read_and_delete_errors_are_friendly(self) -> None:
+        core.init_database()
+        operations = [
+            lambda: core.get_application("missing"),
+            lambda: core.delete_application("missing"),
+            lambda: core.get_status_history("missing"),
+            core.dashboard_stats,
+        ]
+        for operation in operations:
+            with self.subTest(operation=operation), patch.object(
+                core, "_open_sqlite", side_effect=sqlite3.OperationalError("unavailable")
+            ), self.assertRaises(core.AssistantError):
+                operation()
+
+    def test_pipeline_checks_storage_before_spending_api_tokens(self) -> None:
+        client = Mock()
+        with patch.object(
+            core, "init_database", side_effect=core.AssistantError("offline")
+        ), self.assertRaisesRegex(core.AssistantError, "offline"):
+            core.run_pipeline(client, "Resume text", "Job text", "Acme", "Engineer")
+        client.responses.parse.assert_not_called()
+
+    def test_invalid_legacy_csv_encoding_is_friendly_and_retryable(self) -> None:
+        path = Path(core.TRACKER_FILE)
+        path.write_bytes(b"company,role\nAcme,\xff\n")
+        with self.assertRaisesRegex(core.AssistantError, "legacy tracker"):
+            core.init_database()
+        path.write_text("company,role\nAcme,Engineer\n", encoding="utf-8")
+        core.init_database()
+        self.assertEqual(len(core.list_applications()), 1)
+
+    def test_export_includes_all_rows_beyond_display_limit_and_respects_filters(self) -> None:
+        with Path(core.TRACKER_FILE).open("w", newline="", encoding="utf-8") as handle:
+            writer = csv.writer(handle)
+            writer.writerow(["company", "role", "status"])
+            writer.writerows(["Acme", "Engineer", "drafted"] for _ in range(2001))
+            writer.writerow(["Other", "Designer", "applied"])
+        self.assertEqual(len(core.list_applications()), 500)
+        self.assertEqual(len(list(csv.DictReader(StringIO(core.export_applications_csv())))), 2002)
+        filtered = list(csv.DictReader(StringIO(
+            core.export_applications_csv(search="Acme", status="drafted")
+        )))
+        self.assertEqual(len(filtered), 2001)
+        self.assertTrue(all(row["company"] == "Acme" for row in filtered))
+
+    def test_csv_export_neutralizes_formulas_after_whitespace(self) -> None:
+        for value in ("\n=1+1", "  =1+1", "\t@SUM(1)"):
+            with self.subTest(value=value):
+                exported = core.export_applications_csv([{"company": value}])
+                row = next(csv.DictReader(StringIO(exported)))
+                self.assertEqual(row["company"], "'" + value)
+
+    def test_failed_save_rolls_back_application_and_event(self) -> None:
+        core.init_database()
+        original_execute = core._Connection.execute
+
+        def fail_event(connection, sql, parameters=()):
+            if "INSERT INTO application_events" in sql:
+                raise sqlite3.OperationalError("simulated event write failure")
+            return original_execute(connection, sql, parameters)
+
+        with patch.object(core._Connection, "execute", fail_event), self.assertRaises(core.AssistantError):
+            self.save_sample()
+        self.assertEqual(core.list_applications(), [])
+
 
 class PostgresDialectTestCase(unittest.TestCase):
     """The Postgres backend reuses SQLite-flavoured SQL, so translation matters."""
@@ -278,6 +371,15 @@ class PostgresDialectTestCase(unittest.TestCase):
             self.assertTrue(core.use_postgres())
         finally:
             core.DATABASE_URL = original
+
+    @unittest.skipIf(core.psycopg is None, "Postgres driver is not installed")
+    def test_postgres_connection_errors_are_friendly(self) -> None:
+        pool = Mock()
+        pool.connection.side_effect = core.psycopg.OperationalError("connection lost")
+        with patch.object(core, "DATABASE_URL", "postgresql://test.invalid/test"), patch.object(
+            core, "_get_pool", return_value=pool
+        ), self.assertRaises(core.AssistantError), core._database():
+            self.fail("An unavailable database must not yield a connection")
 
 
 if __name__ == "__main__":

@@ -17,11 +17,12 @@ import os
 import re
 import sqlite3
 import zipfile
+from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from io import BytesIO
 from pathlib import Path
-from typing import Iterator, Literal, Optional
+from typing import Literal
 from urllib.parse import urlparse
 from uuid import uuid4
 
@@ -164,14 +165,16 @@ def _now() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
 
-def _clean_text(text: str) -> str:
+def _clean_text(text: str, *, preserve_paragraphs: bool = False) -> str:
     text = text.replace("\x00", "").replace("\r\n", "\n").replace("\r", "\n")
     lines = [re.sub(r"[ \t]+", " ", line).strip() for line in text.split("\n")]
-    return "\n".join(line for line in lines if line).strip()
+    return "\n".join(line for line in lines if line or preserve_paragraphs).strip()
 
 
-def _require_text(value: str, label: str, *, maximum: int) -> str:
-    cleaned = _clean_text(value or "")
+def _require_text(
+    value: str, label: str, *, maximum: int, preserve_paragraphs: bool = False
+) -> str:
+    cleaned = _clean_text(value or "", preserve_paragraphs=preserve_paragraphs)
     if not cleaned:
         raise AssistantError(f"{label} is empty.")
     if len(cleaned) > maximum:
@@ -197,13 +200,23 @@ def validate_job_url(value: str) -> str:
         return ""
     if len(value) > 2_000:
         raise AssistantError("Job URL is too long.")
-    parsed = urlparse(value)
-    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+    try:
+        parsed = urlparse(value)
+        hostname = parsed.hostname
+        # Accessing port validates both numeric format and range.
+        _ = parsed.port
+    except ValueError as exc:
+        raise AssistantError("Job URL is malformed. Enter a valid http:// or https:// URL.") from exc
+    if (
+        parsed.scheme not in {"http", "https"}
+        or not hostname
+        or re.search(r"[\s\x00-\x1f\x7f]", value)
+    ):
         raise AssistantError("Job URL must start with http:// or https://.")
     return value
 
 
-def validate_model(model: Optional[str]) -> str:
+def validate_model(model: str | None) -> str:
     selected = (model or DEFAULT_MODEL).strip()
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,99}", selected):
         raise AssistantError("The model name contains unsupported characters.")
@@ -211,10 +224,10 @@ def validate_model(model: Optional[str]) -> str:
 
 
 def has_server_api_key() -> bool:
-    return bool(os.environ.get("OPENAI_API_KEY"))
+    return bool((os.environ.get("OPENAI_API_KEY") or "").strip())
 
 
-def get_client(api_key: Optional[str] = None) -> OpenAI:
+def get_client(api_key: str | None = None) -> OpenAI:
     key = (api_key or os.environ.get("OPENAI_API_KEY") or "").strip()
     if not key:
         raise AssistantError(
@@ -302,7 +315,8 @@ def extract_resume_text_from_path(path: str) -> str:
     if not file_path.is_file():
         raise AssistantError(f"Resume file not found: {path}")
     try:
-        data = file_path.read_bytes()
+        with file_path.open("rb") as handle:
+            data = handle.read(MAX_FILE_BYTES + 1)
     except OSError as exc:
         raise AssistantError(f"Could not read the resume file: {exc}") from exc
     return extract_resume_text(data, file_path.name)
@@ -319,6 +333,8 @@ def load_job_posting(text_or_path: str) -> str:
                 if candidate.stat().st_size > MAX_FILE_BYTES:
                     raise AssistantError("The job posting file is too large.")
                 value = candidate.read_text(encoding="utf-8-sig")
+        except UnicodeDecodeError as exc:
+            raise AssistantError("The job posting file must use UTF-8 encoding.") from exc
         except OSError as exc:
             raise AssistantError(f"Could not read the job posting: {exc}") from exc
     return _require_text(value, "Job posting", maximum=MAX_JOB_CHARS)
@@ -345,7 +361,7 @@ def generate_application_bundle(
     *,
     company: str,
     role: str,
-    model: Optional[str] = None,
+    model: str | None = None,
 ) -> tuple[ApplicationBundle, dict[str, int]]:
     payload = {
         "task": "Analyze fit and draft truthful application materials.",
@@ -464,7 +480,7 @@ _DB_ERRORS: tuple[type[Exception], ...] = (
 _LIKE_PATTERN = re.compile(r"\bLIKE\b")
 
 _pool: object = None
-_initialized_target: Optional[str] = None
+_initialized_target: str | None = None
 
 
 def _to_postgres(sql: str) -> str:
@@ -557,18 +573,27 @@ def _database() -> Iterator[_Connection]:
                 "Could not reach the application database. Check that DATABASE_URL "
                 "is correct and the database is reachable."
             ) from exc
+        except _DB_ERRORS as exc:
+            raise AssistantError(
+                "The application database operation failed. Check the connection and try again."
+            ) from exc
         return
 
-    connection = _open_sqlite()
     try:
-        with connection:
-            yield _Connection(connection, postgres=False)
-    finally:
-        # Releases the file handle, which Windows requires before deletion.
-        connection.close()
+        connection = _open_sqlite()
+        try:
+            with connection:
+                yield _Connection(connection, postgres=False)
+        finally:
+            # Releases the file handle, which Windows requires before deletion.
+            connection.close()
+    except _DB_ERRORS as exc:
+        raise AssistantError(
+            "The application database operation failed. Check the database file and try again."
+        ) from exc
 
 
-def _safe_int(value: object) -> Optional[int]:
+def _safe_int(value: object) -> int | None:
     try:
         number = int(str(value))
     except (TypeError, ValueError):
@@ -621,7 +646,7 @@ def _migrate_legacy_csv(connection: _Connection) -> None:
                            VALUES (?, ?, NULL, ?, 'Imported from CSV')""",
                         (application_id, created, status),
                     )
-        except (OSError, csv.Error) as exc:
+        except (OSError, UnicodeError, csv.Error) as exc:
             raise AssistantError(f"Could not migrate the legacy tracker: {exc}") from exc
     connection.execute(
         "INSERT INTO metadata(key, value) VALUES('legacy_csv_migrated', ?)", (_now(),)
@@ -646,6 +671,10 @@ def init_database() -> None:
                 _migrate_legacy_csv(connection)
     except AssistantError:
         raise
+    except OSError as exc:
+        raise AssistantError(
+            "Could not create the database directory. Check DATABASE_FILE and folder permissions."
+        ) from exc
     except _DB_ERRORS as exc:
         raise AssistantError(f"Could not initialize the application database: {exc}") from exc
     _initialized_target = target
@@ -731,7 +760,7 @@ def save_application(
     return application_id
 
 
-def list_applications(*, search: str = "", status: str = "", limit: int = 500) -> list[dict]:
+def list_applications(*, search: str = "", status: str = "", limit: int | None = 500) -> list[dict]:
     init_database()
     clauses: list[str] = []
     parameters: list[object] = []
@@ -745,11 +774,14 @@ def list_applications(*, search: str = "", status: str = "", limit: int = 500) -
         clauses.append("status = ?")
         parameters.append(status)
     where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
-    parameters.append(max(1, min(int(limit), 2_000)))
+    limit_sql = ""
+    if limit is not None:
+        parameters.append(max(1, min(int(limit), 2_000)))
+        limit_sql = " LIMIT ?"
     try:
         with _database() as connection:
             rows = connection.execute(
-                f"SELECT * FROM applications {where} ORDER BY created_at DESC LIMIT ?",  # noqa: S608
+                f"SELECT * FROM applications {where} ORDER BY created_at DESC, id DESC{limit_sql}",  # noqa: S608
                 parameters,
             ).fetchall()
     except _DB_ERRORS as exc:
@@ -757,7 +789,7 @@ def list_applications(*, search: str = "", status: str = "", limit: int = 500) -
     return [_row_to_application(row) for row in rows]
 
 
-def get_application(application_id: str) -> Optional[dict]:
+def get_application(application_id: str) -> dict | None:
     init_database()
     with _database() as connection:
         row = connection.execute(
@@ -800,16 +832,18 @@ def update_status(application_id: str, status: str, note: str = "") -> None:
 def update_artifacts(
     application_id: str,
     *,
-    cover_letter: Optional[str] = None,
-    suggested_bullets: Optional[list[dict]] = None,
-    interview_questions: Optional[list[dict]] = None,
+    cover_letter: str | None = None,
+    suggested_bullets: list[dict] | None = None,
+    interview_questions: list[dict] | None = None,
 ) -> None:
     updates: list[str] = []
     values: list[object] = []
     try:
         if cover_letter is not None:
             updates.append("cover_letter = ?")
-            values.append(_require_text(cover_letter, "Cover letter", maximum=7_000))
+            values.append(_require_text(
+                cover_letter, "Cover letter", maximum=7_000, preserve_paragraphs=True
+            ))
         if suggested_bullets is not None:
             validated = [BulletSuggestion.model_validate(item).model_dump(mode="json") for item in suggested_bullets]
             updates.append("bullets_json = ?")
@@ -875,13 +909,20 @@ def dashboard_stats() -> dict[str, int]:
 
 
 def _csv_safe(value: object) -> object:
-    if isinstance(value, str) and value.startswith(("=", "+", "-", "@", "\t", "\r")):
+    if isinstance(value, str) and (
+        value.startswith(("\t", "\r", "\n"))
+        or value.lstrip().startswith(("=", "+", "-", "@"))
+    ):
         return f"'{value}"
     return value
 
 
-def export_applications_csv(applications: Optional[list[dict]] = None) -> str:
-    rows = applications if applications is not None else list_applications(limit=2_000)
+def export_applications_csv(
+    applications: list[dict] | None = None, *, search: str = "", status: str = ""
+) -> str:
+    rows = applications if applications is not None else list_applications(
+        search=search, status=status, limit=None
+    )
     buffer = io.StringIO(newline="")
     writer = csv.DictWriter(buffer, fieldnames=TRACKER_COLUMNS)
     writer.writeheader()
@@ -903,7 +944,7 @@ def build_cover_letter_docx(cover_letter: str, company: str, role: str) -> bytes
     from docx.enum.text import WD_ALIGN_PARAGRAPH
     from docx.shared import Inches, Pt
 
-    text = _require_text(cover_letter, "Cover letter", maximum=7_000)
+    text = _require_text(cover_letter, "Cover letter", maximum=7_000, preserve_paragraphs=True)
     document = Document()
     section = document.sections[0]
     section.top_margin = Inches(0.8)
@@ -935,7 +976,7 @@ def run_pipeline(
     company: str,
     role: str,
     *,
-    model: Optional[str] = None,
+    model: str | None = None,
     resume_name: str = "",
     job_url: str = "",
     source: str = "",
@@ -949,6 +990,8 @@ def run_pipeline(
     source = _clean_text(source)[:200]
     location = _clean_text(location)[:200]
     selected_model = validate_model(model)
+    # Fail early on an unusable storage configuration before making a paid request.
+    init_database()
     bundle, usage = generate_application_bundle(
         client,
         resume_text,

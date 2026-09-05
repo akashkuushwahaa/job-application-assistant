@@ -3,10 +3,14 @@
 > Canonical context snapshot for writing reports, presentations, abstracts, proposals,
 > README files, demonstrations, case studies, and other project documents.
 >
-> Last verified against the repository: **1 September 2026**.
+> Last verified against the repository: **5 September 2026**.
 >
 > This file describes the current implementation. Where older internship materials differ
 > from the code, the current implementation documented here takes precedence.
+>
+> [The 5 September project review](PROJECT_REVIEW.md) records what changed on that date and
+> why, and lists the remaining improvement priorities. This file states the resulting
+> behaviour; the review is the change log behind it.
 
 ## 1. Project identity
 
@@ -24,24 +28,24 @@ the name used in the existing report and presentation.
 
 ### One-sentence description
 
-The Job Application Workspace is a personal, local-first Python application that compares a
-candidate’s resume with a job posting, generates evidence-grounded application materials,
-prepares the candidate for interviews, and tracks the application lifecycle in a local
-SQLite database.
+The Job Application Workspace is a personal Python application that compares a candidate’s
+resume with a job posting, generates evidence-grounded application materials, prepares the
+candidate for interviews, and tracks the application lifecycle in a SQLite database by
+default, or in Postgres when one is configured.
 
 ### Short abstract
 
 Preparing a tailored job application requires candidates to interpret a job description,
 evaluate their fit, adapt their resume, write a cover letter, anticipate interview questions,
 and track follow-up activity. The Job Application Workspace combines these tasks in one
-local-first application. A user supplies a PDF, DOCX, or UTF-8 text resume together with a
+application. A user supplies a PDF, DOCX, or UTF-8 text resume together with a
 job posting and basic role details. The application sends the extracted resume text and job
 posting to an OpenAI model through the Responses API and requests a strictly validated,
 structured result. It produces a transparent fit estimate, requirement-level evidence,
 matched and missing skills, a grounded cover letter, resume-bullet suggestions linked to
 their source evidence, and role-specific interview questions. The generated workspace is
-stored locally in SQLite and can be searched, edited, exported, and moved through a recorded
-status history. The system is decision support rather than an objective ATS scorer, does not
+stored in the configured database and can be searched, edited, exported, and moved through a
+recorded status history. The system is decision support rather than an objective ATS scorer, does not
 auto-submit applications, and instructs the model never to invent candidate facts.
 
 ## 2. Academic attribution
@@ -266,11 +270,13 @@ The project uses a shared-core architecture:
                          | exports         |
                          +---+----------+--+
                              |          |
-                    +--------v--+    +--v----------------+
-                    | OpenAI API |    | Local SQLite DB  |
-                    | Responses  |    | + optional legacy|
-                    | API        |    | CSV import       |
-                    +-----------+    +-------------------+
+                    +--------v--+    +--v-------------------+
+                    | OpenAI API |    | SQLite file, or      |
+                    | Responses  |    | Postgres via         |
+                    | API        |    | DATABASE_URL         |
+                    |            |    | + optional legacy    |
+                    |            |    | CSV import (SQLite)  |
+                    +-----------+    +----------------------+
 ```
 
 The front ends are deliberately thin. Business logic lives in `core.py`, so parsing,
@@ -290,10 +296,13 @@ validation, prompts, persistence, and exports have one source of truth.
 7. Pydantic validates the parsed response and rejects unexpected fields or invalid lengths,
    categories, counts, and scores.
 8. The application saves the job metadata, validated output, model, token usage, resume
-   filename, and resume hash to SQLite. Raw resume text is not saved.
+   filename, and resume hash to the configured database. Raw resume text is not saved.
 9. A creation event records the initial `drafted` status.
 10. The result is displayed by the UI or printed by the CLI. Later edits and status changes
-    update the local database.
+    update the database, and saves refresh the other views and the dashboard counts.
+
+Storage is initialized before the OpenAI request, so an unusable database configuration fails
+before a paid request is spent rather than after.
 
 ## 9. Source-file responsibilities
 
@@ -310,7 +319,8 @@ The shared engine and authoritative business-logic module. It contains:
 - PDF, DOCX, and TXT resume parsing;
 - CLI job-posting loading;
 - structured OpenAI generation and token-usage extraction;
-- SQLite schema, initialization, transactions, CRUD, status history, and dashboard counts;
+- storage-engine selection between SQLite and Postgres, schema initialization, pooled
+  connections, transactions, CRUD, status history, and dashboard counts;
 - one-time legacy CSV migration;
 - CSV export hardening;
 - cover-letter DOCX construction;
@@ -352,9 +362,9 @@ The argparse command-line interface. It can:
 
 ### `tests/test_core.py`
 
-The automated test suite uses temporary databases and mocked AI responses. It does not make
-live OpenAI calls. At the 1 September 2026 verification, all 10 tests passed. Covered behavior
-includes:
+Engine-level tests. They use disposable SQLite databases and mocked AI responses, and make no
+live OpenAI calls. Each test pins `DATABASE_URL` to empty so a configured Postgres database is
+never written to by the suite. Covered behavior includes:
 
 - TXT normalization;
 - unsupported resume-format rejection;
@@ -362,10 +372,28 @@ includes:
 - structured-schema score validation;
 - database create/read/update/delete behavior and status history;
 - one-time legacy CSV migration and status normalization;
-- CSV formula-injection protection;
+- CSV formula-injection protection, including whitespace-prefixed values;
+- complete filtered CSV export beyond the UI display limit;
+- cover-letter paragraph preservation through save, reload, and DOCX export;
 - DOCX export of the current edited cover letter;
 - structured Responses API use with provider-side storage disabled;
-- rejection of unsafe/non-HTTP job URLs.
+- rejection of unsafe/non-HTTP job URLs and malformed URL syntax;
+- Postgres dialect translation of placeholders and case-insensitive search;
+- mocked driver failures surfacing as `AssistantError` rather than raw exceptions.
+
+### `tests/test_app.py`
+
+Streamlit interaction tests built on `streamlit.testing.v1.AppTest`, which exercises app
+behavior without a browser. They cover clearing the API-key field, saves refreshing other
+views and dashboard counts, unsaved edits surviving unrelated reruns, and database failures
+being displayed instead of crashing the page.
+
+### `check_database.py`
+
+A standalone connectivity check. It runs one insert, read, status update, search, and delete
+against whichever engine is configured, then reports the result and removes its own row. It
+names the active engine explicitly and states plainly when a passing run only exercised the
+local SQLite file, so a hosted database is never assumed to have been verified.
 
 ### Configuration and dependency files
 
@@ -461,10 +489,25 @@ rejected.
 
 ### Storage approach
 
-The current application uses a local SQLite database, defaulting to
-`job_applications.db`. Database initialization enables foreign keys, a 10-second busy
-timeout, and write-ahead logging (WAL). Connections use transactions and are explicitly
-closed so file handles are released correctly on Windows.
+The storage engine is selected by `DATABASE_URL`. When it is unset the application uses a
+local SQLite database, defaulting to `job_applications.db`; when it holds a connection string
+the application uses Postgres instead. Both engines share the same table definitions, and the
+schema is created once per process for each configured target.
+
+SQLite initialization enables foreign keys, a 10-second busy timeout, and write-ahead logging
+(WAL). Connections use transactions and are explicitly closed so file handles are released
+correctly on Windows.
+
+Postgres uses a small pooled connection set, closed at interpreter exit. Server-side prepared
+statements are disabled because managed poolers running PgBouncer cannot carry them across
+pooled connections. Call sites are written once in SQLite-flavoured SQL; a connection wrapper
+rewrites placeholders to `%s` and `LIKE` to `ILIKE` so search stays case-insensitive on both
+engines. The only structural difference between the two schemas is the `application_events`
+primary key, which is `AUTOINCREMENT` on SQLite and a generated identity column on Postgres.
+
+Hosted deployment requires Postgres. A platform with an ephemeral filesystem, such as
+Streamlit Community Cloud, discards a SQLite file on every restart, which would silently lose
+every saved application. The sidebar names the active engine so this cannot pass unnoticed.
 
 ### `metadata` table
 
@@ -522,8 +565,11 @@ prevents repeated migration.
 - Otherwise, a password input accepts an API key for the current local browser session.
 - A model text input defaults to the configured model.
 - Privacy captions explain that resume and job text are sent to OpenAI, response storage is
-  disabled, resume text is not locally saved, and generated content/job details are stored in
-  the local database.
+  disabled, resume text is not saved to the database, and generated content/job details are
+  stored in the configured database. The caption names whether that is hosted Postgres or the
+  local SQLite file, and the SQLite path is shown only in the local case.
+- A storage caption names the active engine, and a warning appears if a server is running on
+  SQLite, where the filesystem may not persist across restarts.
 
 ### New analysis tab
 
@@ -589,7 +635,8 @@ Create `.env` from `.env.example`. Never commit the real file.
 |---|---:|---|
 | `OPENAI_API_KEY` | none | Required OpenAI credential; may instead be entered in the local UI session |
 | `OPENAI_MODEL` | `gpt-4o` | Default Structured-Outputs-capable model |
-| `DATABASE_FILE` | `job_applications.db` | Local SQLite database path |
+| `DATABASE_URL` | none | Postgres connection string; when set it replaces SQLite. Required for hosted deployment |
+| `DATABASE_FILE` | `job_applications.db` | Local SQLite database path, used when `DATABASE_URL` is unset |
 | `TRACKER_FILE` | `applications_tracker.csv` | Legacy CSV source used for one-time import |
 | `MAX_FILE_BYTES` | `5242880` | Maximum resume/job-file size in bytes |
 | `MAX_PDF_PAGES` | `25` | Maximum number of PDF resume pages |
@@ -611,8 +658,10 @@ The 25 MiB maximum expanded DOCX size is a code constant rather than an environm
 - pandas 2.2 to below 4.0 — editable/displayed tables in Streamlit
 - python-dotenv 1.0 to below 2.0 — local environment loading
 - Pydantic 2.8 to below 3.0 — strict structured-output and edit validation
-- Python standard library components including argparse, csv, hashlib, sqlite3, zipfile,
-  pathlib, urllib, uuid, and datetime
+- psycopg 3.2 to below 4.0 (binary extra) and psycopg-pool 3.2 to below 4.0 — Postgres driver
+  and connection pooling, imported only when `DATABASE_URL` is set
+- Python standard library components including argparse, atexit, contextlib, csv, hashlib,
+  sqlite3, zipfile, pathlib, urllib, uuid, and datetime
 
 ### Development
 
@@ -656,7 +705,15 @@ python -m pip install -r requirements.txt
 ```
 
 Copy `.env.example` to `.env`, then replace the example key with a real private OpenAI API
-key.
+key. Leave `DATABASE_URL` unset to use the local SQLite file. To use Postgres, set it to a
+connection string and confirm the connection before relying on it:
+
+```bash
+python check_database.py
+```
+
+The script names the engine it tested, so a passing run against SQLite is not mistaken for a
+verified hosted database.
 
 ### Run the web application
 
@@ -678,10 +735,14 @@ python -m pytest
 python -m ruff check .
 ```
 
-Verification on 1 September 2026: **all 10 automated tests passed**. Ruff is configured by
-the repository but was not installed in the interpreter used for this verification, so no
-current lint-pass claim should be made until development dependencies are installed and the
-command succeeds.
+Verification on 5 September 2026: **all 30 automated tests passed and Ruff reported no
+issues**. The suite covers the engine and, through `streamlit.testing.v1.AppTest`, Streamlit
+interaction behavior without a browser.
+
+Postgres was verified separately by running `check_database.py` against a live hosted
+database. The automated suite itself never touches a configured Postgres database; its
+Postgres coverage is dialect translation and mocked driver failures, which does not establish
+live backend compatibility. A disposable Postgres service in CI remains a follow-up item.
 
 ## 17. Privacy, security, safety, and responsible AI
 
@@ -718,9 +779,16 @@ command succeeds.
 
 ### Deployment warning
 
-The current application should not be deployed as a public multi-user service without adding
-authentication, per-user database isolation, encrypted storage, authorization, secret
-management, quotas/rate controls, audit controls, and a deployment-specific privacy policy.
+The application can be hosted, and Postgres support exists so that hosted data survives
+restarts, but nothing about hosting makes it multi-user. There is no login and no per-user
+ownership check on any query, so everyone who can open a deployed instance shares one
+database and sees the same applications. Configuring a server-side `OPENAI_API_KEY` also
+hides the key field, so every visitor generates on that one credential.
+
+A hosted instance therefore remains a personal deployment, and access should be restricted to
+the owner. Turning it into a public multi-user service requires authentication, per-user
+ownership enforced across all queries, encrypted storage, secret management, quotas and rate
+controls, audit controls, and a deployment-specific privacy policy.
 
 ## 18. Error handling
 
@@ -735,9 +803,14 @@ Notable handled conditions include:
 - invalid company, role, URL, status, or model name;
 - OpenAI authentication, rate-limit, timeout, connection, and status errors;
 - missing or schema-invalid model output;
-- SQLite initialization, read, write, and edit failures;
+- database initialization, read, write, and edit failures on either engine, including a
+  Postgres connection that cannot be reached and a database directory that cannot be created;
 - invalid edited artifacts or nonexistent application IDs;
-- legacy CSV read/migration failure.
+- legacy CSV read/migration failure, including non-UTF-8 tracker files.
+
+Driver-level exceptions from SQLite and psycopg are converted into `AssistantError` so raw
+database errors are never shown to the user, and the affected UI sections render the message
+instead of crashing the page.
 
 The OpenAI timeout message notes that user inputs are preserved for retrying in the active UI
 session.
@@ -752,14 +825,21 @@ session.
 - Image-only PDF resumes are rejected because OCR is not implemented.
 - PDF parsing quality depends on the PDF’s embedded text and layout.
 - Job URLs are validated and stored but not fetched.
-- The current database is local and single-user; there is no login or cloud sync.
+- The database is single-user. It can be hosted, but there is no login and no per-user
+  ownership check, so everyone with access to a deployed instance shares the same records.
 - Resume content is not retained, so reopening an old application shows generated content and
   the stored job posting but cannot reproduce the source resume text from the database.
 - Only the cover letter has a document download; resume-bullet and interview-prep document
   exports are not implemented.
 - Cover letters can be downloaded as TXT or DOCX, not PDF.
 - There is no automated end-to-end browser test, performance/load test, accessibility audit,
-  or live-API integration test in the repository.
+  or live-API integration test in the repository. Streamlit behavior is covered by AppTest,
+  which runs without a browser and so validates behavior rather than appearance.
+- No automated test runs against a live Postgres database. Postgres coverage in the suite is
+  dialect translation and mocked driver failures; live compatibility is checked manually with
+  `check_database.py`.
+- A complete CSV export loads all matching applications into memory, so a very large library
+  will be slower and heavier to export than the paged UI suggests.
 - Application deletion is permanent within the app and has no recycle bin.
 - Search covers company, role, and notes, not every stored field.
 - The application has no explicit database schema-version migration framework beyond the
@@ -768,6 +848,11 @@ session.
 ## 20. Future enhancement opportunities
 
 Reasonable future work, clearly described as not yet implemented, includes:
+
+The [5 September project review](PROJECT_REVIEW.md) ranks the six highest-priority items,
+led by draft recovery after a save failure, backup and schema migrations, concurrency
+hardening, Postgres coverage in CI, pagination for large libraries, and authentication before
+any shared hosting. The list below is the broader backlog.
 
 1. Add OCR for scanned resumes.
 2. Add exact job-keyword extraction and highlight missing keywords with evidence-aware advice.
@@ -793,7 +878,7 @@ documents, apply these corrections:
 
 | Older statement | Current verified implementation |
 |---|---|
-| Applications are stored in a CSV tracker. | SQLite is the primary store. CSV is used only for one-time legacy import and export. |
+| Applications are stored in a CSV tracker. | A SQL database is the store: SQLite by default, Postgres when `DATABASE_URL` is set. CSV is used only for one-time legacy import and export. |
 | Re-running a job upserts the same CSV row. | Each completed generation creates a new UUID application record; there is no job-based upsert/deduplication. |
 | Status flow is `drafted → applied → interview → offer/rejected`. | Nine statuses exist: saved, drafted, applied, assessment, interviewing, offer, rejected, withdrawn, archived. |
 | Interview prep produces 5–6 questions. | The validated schema requires 4–8 questions. |
@@ -860,16 +945,19 @@ Use these phrases:
 - “evidence-led fit estimate” instead of “accurate ATS score”;
 - “AI-assisted draft” instead of “automatically perfect document”;
 - “grounded in resume evidence” instead of “guaranteed hallucination-free”;
-- “local-first personal workspace” instead of “production SaaS platform”;
+- “single-user personal workspace, optionally self-hosted” instead of “production SaaS
+  platform”, since hosting adds persistence but not multi-tenancy;
 - “supports application preparation and tracking” instead of “applies to jobs”;
 - “response storage is disabled for generation requests” instead of “OpenAI stores no data”;
 - “resume text is not persisted by the application” instead of “no personal data is stored,”
-  because job data, generated materials, resume filename, and resume hash are stored locally.
+  because job data, generated materials, resume filename, and resume hash are stored in the
+  configured database, which may be hosted rather than local.
 
 ### Facts that must remain consistent
 
-- Current primary storage: SQLite
-- Legacy data: optional one-time CSV import
+- Current storage: SQLite by default, Postgres when `DATABASE_URL` is set
+- Hosted deployment: requires Postgres, because an ephemeral filesystem discards SQLite
+- Legacy data: optional one-time CSV import, applied to the local SQLite file only
 - Interfaces: Streamlit web UI and command-line interface
 - Resume formats: PDF, DOCX, UTF-8 TXT
 - Job file formats in CLI: TXT and Markdown
@@ -880,14 +968,15 @@ Use these phrases:
 - Interview questions: 4–8
 - Resume-bullet suggestions: 1–5
 - New application status: `drafted`
-- Raw resume text: processed in memory, not saved in SQLite
+- Raw resume text: processed in memory, not saved to the database
 - Saved resume identifiers: basename and SHA-256 hash
 - Stored content: job details/text, generated artifacts, analysis, model, token usage, history
 - OpenAI request storage: disabled
 - Exports: cover-letter TXT/DOCX and application CSV
 - Auto-submission: not implemented and intentionally outside scope
-- Verified tests: 10 passing on 1 September 2026
-- Verified lint status: unknown until Ruff is installed and run successfully
+- Verified tests: 30 passing on 5 September 2026
+- Verified lint status: Ruff reports no issues as of 5 September 2026
+- Live Postgres: verified by `check_database.py`, not by the automated suite
 
 ### Citation/reference starting points for academic documents
 
@@ -925,11 +1014,11 @@ Do not cite the sample internship documents as technical evidence about this pro
 
 ## 26. Canonical summary
 
-The Job Application Workspace is a responsible-AI, local-first job-application preparation
-tool built in Python. Its Streamlit and CLI interfaces share `core.py`, which validates and
-parses resumes, makes one structured OpenAI Responses API request, validates the result with
-Pydantic, stores the application workspace and status history in SQLite, and provides secure
-exports. It accepts PDF, DOCX, and UTF-8 TXT resumes; produces evidence-led fit analysis,
+The Job Application Workspace is a responsible-AI job-application preparation tool built in
+Python, local-first by default and deployable against hosted Postgres. Its Streamlit and CLI
+interfaces share `core.py`, which validates and parses resumes, makes one structured OpenAI
+Responses API request, validates the result with Pydantic, stores the application workspace
+and status history in SQLite or Postgres, and provides secure exports. It accepts PDF, DOCX, and UTF-8 TXT resumes; produces evidence-led fit analysis,
 grounded cover letters, traceable resume-bullet rewrites, and interview preparation; and lets
 the user edit, search, filter, export, and track applications. It is not an ATS, does not
 guarantee hiring outcomes, does not store raw resume text in its database, and never submits

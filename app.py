@@ -10,7 +10,6 @@ import streamlit as st
 
 import core
 
-
 st.set_page_config(
     page_title="Job Application Workspace",
     page_icon="📝",
@@ -30,7 +29,23 @@ def _application_id(result: dict) -> str:
 
 def _is_hosted() -> bool:
     """True when running on a server rather than a developer machine."""
-    return bool(os.environ.get("HOSTNAME") or os.environ.get("STREAMLIT_SERVER_HEADLESS"))
+    return bool(
+        os.environ.get("HOSTNAME")
+        or os.environ.get("STREAMLIT_SERVER_HEADLESS", "").lower() in {"true", "1"}
+    )
+
+
+def _sync_widget(key: str, saved_value: object) -> None:
+    """Discard stale widget edits when the underlying saved value changes."""
+    snapshot_key = f"{key}_saved"
+    if snapshot_key in st.session_state and st.session_state[snapshot_key] != saved_value:
+        st.session_state.pop(key, None)
+    st.session_state[snapshot_key] = saved_value
+
+
+def _saved(message: str) -> None:
+    st.session_state["flash"] = message
+    st.rerun()
 
 
 def _show_flash() -> None:
@@ -49,9 +64,9 @@ def _render_storage_status() -> None:
         st.caption("Storage: hosted Postgres.")
     elif _is_hosted():
         st.warning(
-            "DATABASE_URL is not set, so this deployment is writing to a temporary "
-            "file that is erased when the app restarts. Saved applications will be "
-            "lost. Set DATABASE_URL in the app secrets."
+            "This server uses SQLite. If its filesystem is temporary, saved applications "
+            "may be lost on restart. Configure persistent storage or set DATABASE_URL "
+            "to use Postgres."
         )
     else:
         st.caption(f"Storage: local file ({core.DATABASE_FILE}).")
@@ -73,6 +88,8 @@ def render_settings() -> None:
             )
             if key:
                 st.session_state["api_key"] = key
+            else:
+                st.session_state.pop("api_key", None)
 
         _render_storage_status()
 
@@ -85,12 +102,14 @@ def render_settings() -> None:
 
         st.divider()
         st.subheader("Privacy")
+        storage = "hosted Postgres database" if core.use_postgres() else "local SQLite database"
         st.caption(
             "Resume and job text are sent to OpenAI with response storage disabled. "
-            "Resume text is processed in memory and is not saved locally. Generated "
-            "materials and job details are stored in your local SQLite database."
+            "Resume text is processed in memory and is not saved to the database. Generated "
+            f"materials and job details are stored in your {storage}."
         )
-        st.caption(f"Database: {core.DATABASE_FILE}")
+        if not core.use_postgres():
+            st.caption(f"Database: {core.DATABASE_FILE}")
 
 
 def render_analysis(analysis: dict) -> None:
@@ -136,7 +155,7 @@ def render_analysis(analysis: dict) -> None:
                 "action": "Recommended action",
             }
         )
-        st.dataframe(table, hide_index=True, use_container_width=True)
+        st.dataframe(table, hide_index=True, width="stretch")
     else:
         st.info("This older application does not contain requirement-level evidence.")
 
@@ -149,6 +168,7 @@ def render_results(result: dict, *, prefix: str) -> None:
 
     status_key = f"{prefix}_status_{application_id}"
     current_status = result.get("status", "drafted")
+    _sync_widget(status_key, current_status)
     if status_key not in st.session_state:
         st.session_state[status_key] = (
             current_status if current_status in core.STATUSES else "drafted"
@@ -167,7 +187,7 @@ def render_results(result: dict, *, prefix: str) -> None:
             try:
                 core.update_status(application_id, selected_status)
                 result["status"] = selected_status
-                st.success("Status saved.")
+                _saved("Status saved.")
             except core.AssistantError as exc:
                 st.error(str(exc))
 
@@ -180,6 +200,7 @@ def render_results(result: dict, *, prefix: str) -> None:
 
     with letter_tab:
         letter_key = f"{prefix}_letter_{application_id}"
+        _sync_widget(letter_key, result.get("cover_letter", ""))
         if letter_key not in st.session_state:
             st.session_state[letter_key] = result.get("cover_letter", "")
         edited_letter = st.text_area(
@@ -194,7 +215,7 @@ def render_results(result: dict, *, prefix: str) -> None:
                 try:
                     core.update_artifacts(application_id, cover_letter=edited_letter)
                     result["cover_letter"] = edited_letter
-                    st.success("Cover letter saved.")
+                    _saved("Cover letter saved.")
                 except core.AssistantError as exc:
                     st.error(str(exc))
         filename = f"{_slug(company)}-{_slug(role)}-cover-letter"
@@ -222,11 +243,12 @@ def render_results(result: dict, *, prefix: str) -> None:
     with bullets_tab:
         bullets = result.get("suggested_bullets", [])
         if bullets:
+            _sync_widget(f"{prefix}_bullets_{application_id}", bullets)
             bullet_frame = pd.DataFrame(bullets)
             edited_frame = st.data_editor(
                 bullet_frame,
                 hide_index=True,
-                use_container_width=True,
+                width="stretch",
                 disabled=["original_evidence", "reason"],
                 column_config={
                     "original_evidence": st.column_config.TextColumn("Original resume evidence"),
@@ -242,7 +264,7 @@ def render_results(result: dict, *, prefix: str) -> None:
                     edited_bullets = edited_frame.to_dict(orient="records")
                     core.update_artifacts(application_id, suggested_bullets=edited_bullets)
                     result["suggested_bullets"] = edited_bullets
-                    st.success("Resume bullets saved.")
+                    _saved("Resume bullets saved.")
                 except core.AssistantError as exc:
                     st.error(str(exc))
         else:
@@ -273,25 +295,32 @@ def render_results(result: dict, *, prefix: str) -> None:
             "Output tokens": result.get("output_tokens", result.get("usage", {}).get("output_tokens", 0)),
         }
         st.dataframe(
-            pd.DataFrame(details.items(), columns=["Field", "Value"]),
+            pd.DataFrame(
+                [(field, str(value)) for field, value in details.items()],
+                columns=["Field", "Value"],
+            ),
             hide_index=True,
-            use_container_width=True,
+            width="stretch",
         )
         job_text = result.get("job_text", "")
         if job_text:
             with st.expander("Original job posting"):
                 st.text(job_text)
-        history = core.get_status_history(application_id)
+        try:
+            history = core.get_status_history(application_id)
+        except core.AssistantError as exc:
+            st.error(str(exc))
+            history = []
         if history:
             st.subheader("Status history")
-            st.dataframe(pd.DataFrame(history), hide_index=True, use_container_width=True)
+            st.dataframe(pd.DataFrame(history), hide_index=True, width="stretch")
 
 
 def render_new_application() -> None:
     st.header("Prepare an application")
     st.write(
         "Upload a resume and add a job description. The analysis shows the evidence "
-        "behind its fit estimate and saves the resulting workspace locally."
+        "behind its fit estimate and saves the resulting workspace to your configured database."
     )
 
     with st.form("new_application_form", clear_on_submit=False):
@@ -325,7 +354,7 @@ def render_new_application() -> None:
             "I understand that the resume and job posting will be sent to OpenAI for analysis."
         )
         submitted = st.form_submit_button(
-            "Analyze and create workspace", type="primary", use_container_width=True
+            "Analyze and create workspace", type="primary", width="stretch"
         )
 
     if submitted:
@@ -371,8 +400,17 @@ def render_new_application() -> None:
 
     current = st.session_state.get("current_result")
     if current:
-        st.divider()
-        render_results(current, prefix="new")
+        try:
+            current = core.get_application(_application_id(current))
+        except core.AssistantError as exc:
+            st.error(str(exc))
+            return
+        if current:
+            st.session_state["current_result"] = current
+            st.divider()
+            render_results(current, prefix="new")
+        else:
+            st.session_state.pop("current_result", None)
 
 
 def render_application_library() -> None:
@@ -419,10 +457,13 @@ def render_application_library() -> None:
         for item in applications
     ]
     original = pd.DataFrame(rows)
+    if len(rows) == 500:
+        st.caption("Showing the 500 most recent matches. CSV export includes all matching applications.")
+    _sync_widget("application_library_editor", rows)
     edited = st.data_editor(
         original,
         hide_index=True,
-        use_container_width=True,
+        width="stretch",
         disabled=["id", "date", "company", "role", "match_score"],
         column_config={
             "id": None,
@@ -442,16 +483,19 @@ def render_application_library() -> None:
                     if row["status"] != original_by_id[row["id"]]:
                         core.update_status(row["id"], row["status"])
                         changed += 1
-                st.success(f"Saved {changed} status change{'s' if changed != 1 else ''}.")
+                _saved(f"Saved {changed} status change{'s' if changed != 1 else ''}.")
             except core.AssistantError as exc:
                 st.error(str(exc))
     with action_columns[1]:
-        st.download_button(
-            "Export filtered CSV",
-            core.export_applications_csv(applications),
-            "job-applications.csv",
-            mime="text/csv",
-        )
+        try:
+            csv_data = core.export_applications_csv(
+                search=search, status="" if status_choice == "All" else status_choice
+            )
+            st.download_button(
+                "Export filtered CSV", csv_data, "job-applications.csv", mime="text/csv"
+            )
+        except core.AssistantError as exc:
+            st.error(str(exc))
 
     labels = {
         item["id"]: f"{item['company']} — {item['role']} ({item['created_at'][:10]})"
@@ -462,12 +506,16 @@ def render_application_library() -> None:
         list(labels),
         format_func=lambda value: labels[value],
     )
-    selected = core.get_application(selected_id)
+    try:
+        selected = core.get_application(selected_id)
+    except core.AssistantError as exc:
+        st.error(str(exc))
+        return
     if selected:
         st.divider()
         render_results(selected, prefix="library")
         with st.expander("Delete this application"):
-            st.warning("Deletion removes the saved materials and status history from this device.")
+            st.warning("Deletion removes the saved materials and status history from the database.")
             confirmed = st.checkbox(
                 "I understand this cannot be undone.", key=f"delete_confirm_{selected_id}"
             )

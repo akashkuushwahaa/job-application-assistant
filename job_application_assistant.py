@@ -58,7 +58,8 @@ def cmd_run(args: argparse.Namespace) -> int:
         print(f"  Tip: {question['tip']}")
 
     usage = result.get("usage", {})
-    print(f"\nSaved as application {result['application_id']} in {core.DATABASE_FILE}")
+    storage = "Postgres" if core.use_postgres() else core.DATABASE_FILE
+    print(f"\nSaved as application {result['application_id']} in {storage}")
     print(f"Token usage: {usage.get('total_tokens', 0)} total")
     return 0
 

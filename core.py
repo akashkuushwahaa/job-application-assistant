@@ -7,6 +7,8 @@ in memory and is not stored; generated artifacts and job metadata are local.
 
 from __future__ import annotations
 
+import atexit
+import contextlib
 import csv
 import hashlib
 import io
@@ -517,7 +519,20 @@ def _get_pool() -> object:
             },
             open=True,
         )
+        # Without this the pool's worker threads are still running at
+        # interpreter shutdown, which surfaces as a PythonFinalizationError
+        # traceback after the program has already done its work.
+        atexit.register(_close_pool)
     return _pool
+
+
+def _close_pool() -> None:
+    global _pool
+    pool, _pool = _pool, None
+    if pool is not None:
+        # Nothing useful can be done about a failure to close during shutdown.
+        with contextlib.suppress(Exception):
+            pool.close()
 
 
 def _open_sqlite() -> sqlite3.Connection:

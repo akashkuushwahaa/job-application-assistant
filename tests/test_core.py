@@ -59,6 +59,11 @@ class CoreTestCase(unittest.TestCase):
     def setUp(self) -> None:
         self.original_database = core.DATABASE_FILE
         self.original_tracker = core.TRACKER_FILE
+        self.original_url = core.DATABASE_URL
+        # Pin every test to a throwaway SQLite file. Without this, a developer
+        # with DATABASE_URL configured would run the suite against the real
+        # hosted database, writing test rows into it.
+        core.DATABASE_URL = ""
         identifier = uuid4().hex
         test_directory = Path(__file__).parent
         core.DATABASE_FILE = str(test_directory / f".test-{identifier}.db")
@@ -73,6 +78,7 @@ class CoreTestCase(unittest.TestCase):
         ]
         core.DATABASE_FILE = self.original_database
         core.TRACKER_FILE = self.original_tracker
+        core.DATABASE_URL = self.original_url
         for path in generated:
             path.unlink(missing_ok=True)
 

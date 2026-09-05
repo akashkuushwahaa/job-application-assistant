@@ -158,6 +158,20 @@ restart and redeploy, so a SQLite file would silently lose every saved
 application. Create a free Postgres database (Neon or Supabase both work), then
 add its connection string as a secret.
 
+This app connects straight to Postgres, so it needs a database connection
+string, not a project API key. On Supabase these are different values: the
+`SUPABASE_URL` and `SUPABASE_*_KEY` values are for Supabase's REST clients and
+this app does not use them. The value to copy is under
+*Project Settings > Database > Connection string*. Choose the **Session pooler**
+URI rather than the direct connection, because direct connections are IPv6-only
+and most hosting platforms are IPv4. It looks like:
+
+```text
+postgresql://postgres.<project-ref>:<password>@aws-0-<region>.pooler.supabase.com:5432/postgres
+```
+
+Substitute your real database password, then append `?sslmode=require`.
+
 **Deployment steps**
 
 1. Push this repository to GitHub.

@@ -28,10 +28,33 @@ def _application_id(result: dict) -> str:
     return str(result.get("application_id") or result.get("id") or "current")
 
 
+def _is_hosted() -> bool:
+    """True when running on a server rather than a developer machine."""
+    return bool(os.environ.get("HOSTNAME") or os.environ.get("STREAMLIT_SERVER_HEADLESS"))
+
+
 def _show_flash() -> None:
     message = st.session_state.pop("flash", None)
     if message:
         st.success(message)
+
+
+def _render_storage_status() -> None:
+    """Make the active storage engine visible.
+
+    A hosted deployment that silently falls back to SQLite would lose every
+    saved application on the next restart, so surface that rather than hide it.
+    """
+    if core.use_postgres():
+        st.caption("Storage: hosted Postgres.")
+    elif _is_hosted():
+        st.warning(
+            "DATABASE_URL is not set, so this deployment is writing to a temporary "
+            "file that is erased when the app restarts. Saved applications will be "
+            "lost. Set DATABASE_URL in the app secrets."
+        )
+    else:
+        st.caption(f"Storage: local file ({core.DATABASE_FILE}).")
 
 
 def render_settings() -> None:
@@ -50,6 +73,8 @@ def render_settings() -> None:
             )
             if key:
                 st.session_state["api_key"] = key
+
+        _render_storage_status()
 
         st.session_state["model"] = st.text_input(
             "Model",

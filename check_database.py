@@ -108,7 +108,14 @@ def main() -> int:
                 print(f"Could not clean up row {application_id}; delete it manually.")
         return 1
 
-    print("\nAll checks passed. Persistence is working.")
+    if core.use_postgres():
+        print("\nAll checks passed. Postgres persistence is working.")
+    else:
+        print(
+            "\nAll checks passed, but this tested the LOCAL SQLITE FILE.\n"
+            "DATABASE_URL is not set, so nothing about the hosted database was\n"
+            "verified. Set DATABASE_URL and run this again before deploying."
+        )
     return 0
 
 

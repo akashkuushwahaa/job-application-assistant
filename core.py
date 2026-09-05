@@ -506,7 +506,15 @@ def _get_pool() -> object:
             min_size=1,
             max_size=4,
             timeout=15,
-            kwargs={"row_factory": dict_row, "connect_timeout": 15},
+            kwargs={
+                "row_factory": dict_row,
+                "connect_timeout": 15,
+                # Managed poolers such as Supabase's transaction pooler run
+                # PgBouncer, which cannot carry server-side prepared statements
+                # across pooled connections. Disabling them costs little at this
+                # query volume and keeps every connection string usable.
+                "prepare_threshold": None,
+            },
             open=True,
         )
     return _pool

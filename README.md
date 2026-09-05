@@ -163,8 +163,9 @@ add its connection string as a secret.
 1. Push this repository to GitHub.
 2. At [share.streamlit.io](https://share.streamlit.io), create an app pointing
    at this repo, branch `main`, main file `app.py`.
-3. Under *Advanced settings*, choose Python 3.13. Newer versions are not
-   supported by Community Cloud.
+3. Under *Advanced settings*, pick the newest Python version offered (3.13 at
+   the time of writing). Community Cloud lags behind the latest release, so the
+   version you develop against locally may not appear in the list.
 4. Under *Advanced settings > Secrets*, add:
 
    ```toml

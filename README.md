@@ -161,16 +161,22 @@ add its connection string as a secret.
 This app connects straight to Postgres, so it needs a database connection
 string, not a project API key. On Supabase these are different values: the
 `SUPABASE_URL` and `SUPABASE_*_KEY` values are for Supabase's REST clients and
-this app does not use them. The value to copy is under
-*Project Settings > Database > Connection string*. Choose the **Session pooler**
-URI rather than the direct connection, because direct connections are IPv6-only
-and most hosting platforms are IPv4. It looks like:
+this app does not use them.
+
+To get the connection string, open the project and click the **Connect** button
+in the top bar of the dashboard. In the panel that opens, copy the URI under
+**Session pooler**. Prefer that over the direct connection: the shared pooler is
+IPv4-compatible on every tier, while direct connections need IPv6 or the paid
+IPv4 add-on, so a direct string that works from your machine can still fail on a
+hosting platform. The session pooler URI looks like:
 
 ```text
-postgresql://postgres.<project-ref>:<password>@aws-0-<region>.pooler.supabase.com:5432/postgres
+postgresql://postgres.<project-ref>:<password>@aws-<region>.pooler.supabase.com:5432/postgres
 ```
 
-Substitute your real database password, then append `?sslmode=require`.
+Copy it from the dashboard rather than typing it out, replace `<password>` with
+your database password (resettable in the project's database settings), and
+append `?sslmode=require`.
 
 **Deployment steps**
 

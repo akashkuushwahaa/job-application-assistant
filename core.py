@@ -41,7 +41,7 @@ except ImportError:  # pragma: no cover
     pass
 
 
-DEFAULT_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
+DEFAULT_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o")
 DATABASE_FILE = os.environ.get("DATABASE_FILE", "job_applications.db")
 TRACKER_FILE = os.environ.get("TRACKER_FILE", "applications_tracker.csv")
 

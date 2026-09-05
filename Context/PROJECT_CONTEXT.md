@@ -402,7 +402,7 @@ contents are not part of the canonical project description.
 
 - Provider: OpenAI
 - API style: Responses API structured parsing through `client.responses.parse`
-- Default model: `gpt-4o-mini`, overridable through `OPENAI_MODEL` or the UI/CLI
+- Default model: `gpt-4o`, overridable through `OPENAI_MODEL` or the UI/CLI
 - Client retries: two
 - Default request timeout: 90 seconds
 - Response storage: disabled for the request with `store=False`
@@ -588,7 +588,7 @@ Create `.env` from `.env.example`. Never commit the real file.
 | Variable | Default | Purpose |
 |---|---:|---|
 | `OPENAI_API_KEY` | none | Required OpenAI credential; may instead be entered in the local UI session |
-| `OPENAI_MODEL` | `gpt-4o-mini` | Default Structured-Outputs-capable model |
+| `OPENAI_MODEL` | `gpt-4o` | Default Structured-Outputs-capable model |
 | `DATABASE_FILE` | `job_applications.db` | Local SQLite database path |
 | `TRACKER_FILE` | `applications_tracker.csv` | Legacy CSV source used for one-time import |
 | `MAX_FILE_BYTES` | `5242880` | Maximum resume/job-file size in bytes |
@@ -802,7 +802,7 @@ documents, apply these corrections:
 | A database, search, and analytics dashboard are future work. | SQLite, search, status filters, application counts, reopening, status history, and CSV export are implemented. |
 | The pipeline is described as separate score/draft/bullets/questions model stages. | Parsing is separate, but the AI analysis and all generated materials come from one structured model request. |
 | pandas/csv provide the application tracker. | pandas supports web tables/editors; SQLite implements the tracker; `csv` supports migration/export. |
-| GPT-4o/GPT-4o-mini are the fixed AI models. | The default is `gpt-4o-mini`; a valid Structured-Outputs-capable model can be configured. |
+| The AI model is fixed and cannot be changed. | The default is `gpt-4o`; any valid Structured-Outputs-capable model can be configured. |
 
 These corrections matter because the current repository has already implemented several
 items labeled as “future enhancement” in the older report.
@@ -873,7 +873,7 @@ Use these phrases:
 - Interfaces: Streamlit web UI and command-line interface
 - Resume formats: PDF, DOCX, UTF-8 TXT
 - Job file formats in CLI: TXT and Markdown
-- Default model: `gpt-4o-mini`, configurable
+- Default model: `gpt-4o`, configurable
 - AI response method: one strict structured `ApplicationBundle`
 - Fit score: 0–100 estimate, not an objective ATS score
 - Low-fit warning threshold: below 40

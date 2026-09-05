@@ -66,7 +66,7 @@ Copy `.env.example` to `.env`, then set your OpenAI API key:
 
 ```dotenv
 OPENAI_API_KEY=sk-your-key-here
-OPENAI_MODEL=gpt-4o-mini
+OPENAI_MODEL=gpt-4o
 DATABASE_FILE=job_applications.db
 ```
 

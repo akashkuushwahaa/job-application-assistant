@@ -798,6 +798,31 @@ def get_application(application_id: str) -> dict | None:
     return _row_to_application(row) if row else None
 
 
+def resolve_status_edits(edits: object, rows: list[dict]) -> list[tuple[str, str]]:
+    """Map an editable-table edit payload onto (application_id, new_status) pairs.
+
+    The payload is keyed by row position rather than by identity, so a position
+    that no longer resolves to the row it was made against is skipped instead of
+    writing a status onto the wrong application.
+    """
+    if not isinstance(edits, dict):
+        return []
+    changes: list[tuple[str, str]] = []
+    for index, changed in edits.items():
+        if not isinstance(changed, dict):
+            continue
+        status = changed.get("status")
+        if status is None:
+            continue
+        try:
+            row = rows[int(index)]
+        except (IndexError, KeyError, TypeError, ValueError):
+            continue
+        if status != row.get("status"):
+            changes.append((row["id"], status))
+    return changes
+
+
 def update_status(application_id: str, status: str, note: str = "") -> None:
     if status not in STATUSES:
         raise AssistantError(f"Unknown status '{status}'.")

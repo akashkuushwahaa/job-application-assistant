@@ -594,6 +594,13 @@ The result header identifies the role and company and offers status selection. F
 Shows dashboard metrics, text search, status filtering, an editable status table, CSV export,
 saved-application selection, full result reopening, and confirmed deletion.
 
+Status edits in the table save as soon as a value is picked, with no separate save step. The
+write happens in the editor's change callback, before Streamlit reruns the script, so the
+dashboard counts drawn on that rerun already include the change. Because the edit payload is
+keyed by row position rather than by application, a position that no longer resolves to the
+row it was made against is skipped instead of writing a status onto the wrong application.
+The per-application status control in the reopened workspace keeps its explicit save button.
+
 ## 13. Command-line interface
 
 ### Run a new analysis

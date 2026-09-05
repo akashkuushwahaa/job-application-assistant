@@ -48,6 +48,34 @@ def _saved(message: str) -> None:
     st.rerun()
 
 
+LIBRARY_EDITOR_KEY = "application_library_editor"
+
+
+def _apply_library_status_edits(rows: list[dict]) -> None:
+    """Persist an inline status edit as soon as the table changes.
+
+    Runs as the editor's on_change callback, before Streamlit reruns the
+    script, so the dashboard counts recomputed on that rerun already include
+    the change. Errors are stashed rather than rendered, because a callback
+    runs before the page is drawn.
+    """
+    state = st.session_state.get(LIBRARY_EDITOR_KEY) or {}
+    changes = core.resolve_status_edits(state.get("edited_rows"), rows)
+    if not changes:
+        return
+
+    try:
+        for application_id, status in changes:
+            core.update_status(application_id, status)
+    except core.AssistantError as exc:
+        st.session_state["library_error"] = str(exc)
+        return
+
+    st.session_state["flash"] = (
+        f"Saved {len(changes)} status change{'s' if len(changes) != 1 else ''}."
+    )
+
+
 def _show_flash() -> None:
     message = st.session_state.pop("flash", None)
     if message:
@@ -459,8 +487,8 @@ def render_application_library() -> None:
     original = pd.DataFrame(rows)
     if len(rows) == 500:
         st.caption("Showing the 500 most recent matches. CSV export includes all matching applications.")
-    _sync_widget("application_library_editor", rows)
-    edited = st.data_editor(
+    _sync_widget(LIBRARY_EDITOR_KEY, rows)
+    st.data_editor(
         original,
         hide_index=True,
         width="stretch",
@@ -471,31 +499,24 @@ def render_application_library() -> None:
                 "Status", options=core.STATUSES, required=True
             ),
         },
-        key="application_library_editor",
+        key=LIBRARY_EDITOR_KEY,
+        on_change=_apply_library_status_edits,
+        args=(rows,),
     )
-    action_columns = st.columns([2, 1])
-    with action_columns[0]:
-        if st.button("Save status changes"):
-            try:
-                original_by_id = {row["id"]: row["status"] for row in rows}
-                changed = 0
-                for row in edited.to_dict(orient="records"):
-                    if row["status"] != original_by_id[row["id"]]:
-                        core.update_status(row["id"], row["status"])
-                        changed += 1
-                _saved(f"Saved {changed} status change{'s' if changed != 1 else ''}.")
-            except core.AssistantError as exc:
-                st.error(str(exc))
-    with action_columns[1]:
-        try:
-            csv_data = core.export_applications_csv(
-                search=search, status="" if status_choice == "All" else status_choice
-            )
-            st.download_button(
-                "Export filtered CSV", csv_data, "job-applications.csv", mime="text/csv"
-            )
-        except core.AssistantError as exc:
-            st.error(str(exc))
+    st.caption("Status changes save as soon as you pick one.")
+    editor_error = st.session_state.pop("library_error", None)
+    if editor_error:
+        st.error(editor_error)
+
+    try:
+        csv_data = core.export_applications_csv(
+            search=search, status="" if status_choice == "All" else status_choice
+        )
+        st.download_button(
+            "Export filtered CSV", csv_data, "job-applications.csv", mime="text/csv"
+        )
+    except core.AssistantError as exc:
+        st.error(str(exc))
 
     labels = {
         item["id"]: f"{item['company']} — {item['role']} ({item['created_at'][:10]})"

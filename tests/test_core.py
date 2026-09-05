@@ -286,6 +286,28 @@ class CoreTestCase(unittest.TestCase):
             core.run_pipeline(client, "Resume text", "Job text", "Acme", "Engineer")
         client.responses.parse.assert_not_called()
 
+    def test_inline_status_edits_resolve_to_the_edited_application(self) -> None:
+        rows = [
+            {"id": "first", "status": "drafted"},
+            {"id": "second", "status": "applied"},
+        ]
+        # The editable table reports edits keyed by row position.
+        self.assertEqual(
+            core.resolve_status_edits({0: {"status": "applied"}}, rows),
+            [("first", "applied")],
+        )
+        # Re-selecting the value a row already has is not a change.
+        self.assertEqual(core.resolve_status_edits({1: {"status": "applied"}}, rows), [])
+        # Edits to other columns are ignored.
+        self.assertEqual(core.resolve_status_edits({0: {"notes": "x"}}, rows), [])
+
+    def test_inline_status_edits_skip_positions_that_no_longer_resolve(self) -> None:
+        """A stale row position must never write a status onto the wrong application."""
+        rows = [{"id": "only", "status": "drafted"}]
+        for edits in ({5: {"status": "offer"}}, {"bad": {"status": "offer"}}, None, "x"):
+            with self.subTest(edits=edits):
+                self.assertEqual(core.resolve_status_edits(edits, rows), [])
+
     def test_invalid_legacy_csv_encoding_is_friendly_and_retryable(self) -> None:
         path = Path(core.TRACKER_FILE)
         path.write_bytes(b"company,role\nAcme,\xff\n")
